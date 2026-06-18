@@ -431,7 +431,12 @@ def run_udp_to_tcp(local_host, local_port, remote_host, remote_port, workers):
 	with udp_sock, ThreadPoolExecutor(max_workers=workers) as executor:
 		try:
 			while True:
-				payload, client_addr = udp_sock.recvfrom(BUFFER_SIZE)
+				try:
+					payload, client_addr = udp_sock.recvfrom(BUFFER_SIZE)
+				except ConnectionResetError:
+					# Ignore ICMP "port unreachable" on Windows which maps to
+					# WSAECONNRESET (10054). Continue listening for other packets.
+					continue
 				executor.submit(forward_udp_packet, tunnel, payload, client_addr)
 		except KeyboardInterrupt:
 			print("\n[u2t] Shutdown signal received, closing")
