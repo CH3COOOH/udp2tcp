@@ -15,15 +15,25 @@ import ipaddress
 import socket
 import struct
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 
 BUFFER_SIZE = 65535
+MAX_FRAME_SIZE = 65535
 FRAME_HEADER_SIZE = 4
 MSG_UDP_TO_REMOTE = 1
 MSG_REMOTE_TO_UDP = 2
 ADDR_TYPE_IPV4 = 4
 ADDR_TYPE_IPV6 = 6
+
+# Toggle debug logging with --debug
+DEBUG = False
+
+
+def debug(msg):
+	if DEBUG:
+		print(msg)
 
 
 def parse_endpoint(value):
@@ -146,6 +156,8 @@ def read_frame(sock):
 	body_len = struct.unpack("!I", header)[0]
 	if body_len == 0:
 		return b""
+	if body_len > MAX_FRAME_SIZE:
+		raise ValueError(f"Frame too large: {body_len} bytes")
 	return recv_exact(sock, body_len)
 
 
@@ -251,9 +263,13 @@ class TcpPacketSender:
 		family, socktype, proto, _, sockaddr = resolve_address(
 			self.host, self.port, socket.SOCK_STREAM
 		)
+		debug(f"[TcpPacketSender] Connecting to {self.host}:{self.port}")
 		sock = socket.socket(family, socktype, proto)
 		sock.connect(sockaddr)
+		# Disable Nagle for lower latency where appropriate
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		self.sock = sock
+		debug(f"[TcpPacketSender] Connected to {self.host}:{self.port}")
 
 	def send_packet(self, payload):
 		"""
@@ -271,9 +287,11 @@ class TcpPacketSender:
 			for attempt in range(2):
 				try:
 					self._connect_locked()
+					debug(f"[TcpPacketSender] Sending {len(payload)} bytes (attempt {attempt+1}) to {self.host}:{self.port}")
 					self.sock.sendall(frame)
 					return
-				except OSError:
+				except OSError as exc:
+					debug(f"[TcpPacketSender] Send failed (attempt {attempt+1}): {exc}")
 					if self.sock is not None:
 						try:
 							self.sock.close()
@@ -289,6 +307,7 @@ class TcpPacketSender:
 		"""
 		with self.lock:
 			if self.sock is not None:
+				debug(f"[TcpPacketSender] Closing connection to {self.host}:{self.port}")
 				try:
 					self.sock.close()
 				finally:
@@ -322,6 +341,7 @@ class TcpFramedConnection:
 		Close and reset the socket (internal method, must be called with state_lock).
 		"""
 		if self.sock is not None:
+			debug(f"[TcpFramedConnection] Resetting/closing connection to {self.host}:{self.port}")
 			try:
 				self.sock.close()
 			except OSError:
@@ -341,9 +361,13 @@ class TcpFramedConnection:
 		family, socktype, proto, _, sockaddr = resolve_address(
 			self.host, self.port, socket.SOCK_STREAM
 		)
+		debug(f"[TcpFramedConnection] Connecting to {self.host}:{self.port}")
 		sock = socket.socket(family, socktype, proto)
 		sock.connect(sockaddr)
+		# Disable Nagle for lower latency where appropriate
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		self.sock = sock
+		debug(f"[TcpFramedConnection] Connected to {self.host}:{self.port}")
 		return sock
 
 	def send_frame(self, frame):
@@ -361,9 +385,11 @@ class TcpFramedConnection:
 				try:
 					with self.state_lock:
 						sock = self._ensure_connected_locked()
+					debug(f"[TcpFramedConnection] Sending frame {len(frame)} bytes (attempt {attempt+1}) to {self.host}:{self.port}")
 					sock.sendall(frame)
 					return
-				except OSError:
+				except OSError as exc:
+					debug(f"[TcpFramedConnection] Send failed (attempt {attempt+1}): {exc}")
 					with self.state_lock:
 						self._reset_locked()
 					if attempt == 1:
@@ -385,9 +411,11 @@ class TcpFramedConnection:
 			try:
 				frame = read_frame(sock)
 				if frame is None:
+					debug(f"[TcpFramedConnection] Peer closed connection {self.host}:{self.port}")
 					raise OSError("TCP peer closed")
 				return frame
-			except OSError:
+			except OSError as exc:
+				debug(f"[TcpFramedConnection] Read error: {exc}, resetting and retrying")
 				with self.state_lock:
 					self._reset_locked()
 
@@ -396,6 +424,7 @@ class TcpFramedConnection:
 		Close the connection.
 		"""
 		with self.state_lock:
+			debug(f"[TcpFramedConnection] Closing connection to {self.host}:{self.port}")
 			self._reset_locked()
 
 
@@ -470,6 +499,7 @@ def u2t_reverse_loop(tunnel, udp_sock, stop_event):
 			if stop_event.is_set():
 				return
 			print(f"[u2t] Reverse relay error: {exc}")
+			time.sleep(10)  # Avoid tight loop on persistent errors
 
 
 def forward_udp_packet(tunnel, payload, client_addr):
@@ -487,6 +517,7 @@ def forward_udp_packet(tunnel, payload, client_addr):
 		print(f"[u2t] {client_addr} -> TCP, {len(payload)} bytes")
 	except OSError as exc:
 		print(f"[u2t] Forwarding failed for {client_addr}: {exc}")
+		time.sleep(10)  # Avoid tight loop on persistent errors
 
 
 def run_tcp_to_udp(local_host, local_port, remote_host, remote_port, workers):
@@ -517,7 +548,11 @@ def run_tcp_to_udp(local_host, local_port, remote_host, remote_port, workers):
 	with tcp_sock, ThreadPoolExecutor(max_workers=workers) as executor:
 		try:
 			while True:
-				conn, client_addr = tcp_sock.accept()
+				try:
+					conn, client_addr = tcp_sock.accept()
+				except OSError as exc:
+					print(f"[t2u] Accept failed: {exc}")
+					continue
 				executor.submit(
 					handle_tcp_client,
 					conn,
@@ -551,7 +586,12 @@ def handle_tcp_client(conn, client_addr, udp_family, udp_target):
 	def send_back_to_tcp(endpoint, payload):
 		frame = pack_datagram_frame(MSG_REMOTE_TO_UDP, endpoint, payload)
 		with send_lock:
-			conn.sendall(frame)
+			try:
+				conn.sendall(frame)
+			except OSError as exc:
+				print(f"[t2u] Send back to TCP failed for {endpoint}: {exc}")
+				stop_event.set()
+				raise
 
 	def reply_reader(endpoint, flow_sock):
 		while not stop_event.is_set():
@@ -561,7 +601,8 @@ def handle_tcp_client(conn, client_addr, udp_family, udp_target):
 					break
 				send_back_to_tcp(endpoint, payload)
 				print(f"[t2u] UDP {udp_target} -> TCP, {len(payload)} bytes for {endpoint}")
-			except OSError:
+			except OSError as exc:
+				print(f"[t2u] Reply reader failed for {endpoint}: {exc}")
 				break
 
 	def get_or_create_flow(endpoint):
@@ -593,7 +634,17 @@ def handle_tcp_client(conn, client_addr, udp_family, udp_target):
 					continue
 
 				flow_sock, _ = get_or_create_flow(endpoint)
-				flow_sock.send(payload)
+				try:
+					flow_sock.send(payload)
+				except OSError as exc:
+					print(f"[t2u] UDP send failed for {endpoint} -> {udp_target}: {exc}")
+					with flow_lock:
+						flows.pop(endpoint, None)
+					try:
+						flow_sock.close()
+					except OSError:
+						pass
+					continue
 				print(f"[t2u] TCP {endpoint} -> UDP {udp_target}, {len(payload)} bytes")
 		except (OSError, ValueError) as exc:
 			print(f"[t2u] Client handling failed for {client_addr}: {exc}")
@@ -645,6 +696,11 @@ def build_parser():
 		default=8,
 		help="Thread pool size, default is 8",
 	)
+	parser.add_argument(
+		"--debug",
+		action="store_true",
+		help="Enable debug logging",
+	)
 	return parser
 
 
@@ -657,6 +713,10 @@ def main():
 	"""
 	parser = build_parser()
 	args = parser.parse_args()
+
+	# Enable debug logging if requested
+	global DEBUG
+	DEBUG = bool(args.debug)
 
 	if args.workers < 1:
 		parser.error("--workers must be greater than or equal to 1")
