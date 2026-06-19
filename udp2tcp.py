@@ -11,9 +11,12 @@ to relay responses back to original clients.
 """
 
 import argparse
+import hashlib
 import ipaddress
+import os
 import socket
 import struct
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,14 +29,101 @@ MSG_UDP_TO_REMOTE = 1
 MSG_REMOTE_TO_UDP = 2
 ADDR_TYPE_IPV4 = 4
 ADDR_TYPE_IPV6 = 6
+NONCE_SIZE = 12
 
 # Toggle debug logging with --debug
 DEBUG = False
+ENCRYPTION_ENABLED = False
+ENCRYPTION_KEY = None
 
 
 def debug(msg):
 	if DEBUG:
 		print(msg)
+
+
+def ensure_crypto_available():
+	"""
+	Ensure the cryptography library is installed and usable.
+	"""
+	try:
+		from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+		return ChaCha20Poly1305
+	except ImportError as exc:
+		raise RuntimeError(
+			"cryptography library is required for ChaCha20-Poly1305 encryption. "
+			"Install it with 'pip install cryptography'."
+		) from exc
+
+
+def derive_key_from_password(password):
+	"""
+	Derive a 256-bit key from the password using SHA-256.
+	"""
+	return hashlib.sha256(password.encode("utf-8")).digest()
+
+
+def encrypt_frame_body(body):
+	"""
+	Encrypt a frame body using ChaCha20-Poly1305.
+
+	Args:
+		body: Plaintext bytes to encrypt
+
+	Returns:
+		Nonce + ciphertext+tag bytes
+	"""
+	ChaCha20Poly1305 = ensure_crypto_available()
+	nonce = os.urandom(NONCE_SIZE)
+	cipher = ChaCha20Poly1305(ENCRYPTION_KEY)
+	ciphertext = cipher.encrypt(nonce, body, None)
+	return nonce + ciphertext
+
+
+def decrypt_frame_body(frame_body):
+	"""
+	Decrypt a frame body produced by encrypt_frame_body.
+
+	Args:
+		frame_body: Nonce + ciphertext+tag bytes
+
+	Returns:
+		Plaintext bytes
+	"""
+	if len(frame_body) < NONCE_SIZE:
+		raise ValueError("Encrypted frame body is too short")
+	ChaCha20Poly1305 = ensure_crypto_available()
+	nonce = frame_body[:NONCE_SIZE]
+	ciphertext = frame_body[NONCE_SIZE:]
+	cipher = ChaCha20Poly1305(ENCRYPTION_KEY)
+	try:
+		return cipher.decrypt(nonce, ciphertext, None)
+	except Exception as exc:
+		try:
+			from cryptography.exceptions import InvalidTag
+		except ImportError:
+			raise ValueError("Decryption failed") from exc
+		if isinstance(exc, InvalidTag):
+			raise ValueError("Decryption failed or authentication tag invalid") from exc
+		raise
+
+
+def reset_tcp_connection(sock):
+	"""
+	Force immediate TCP connection reset.
+	"""
+	try:
+		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+	except OSError:
+		pass
+	try:
+		sock.shutdown(socket.SHUT_RDWR)
+	except OSError:
+		pass
+	try:
+		sock.close()
+	except OSError:
+		pass
 
 
 def parse_endpoint(value):
@@ -197,6 +287,8 @@ def pack_datagram_frame(msg_type, endpoint, payload):
 		addr_type = ADDR_TYPE_IPV6
 	packed_ip = ip_obj.packed
 	body = struct.pack("!BBH", msg_type, addr_type, port) + packed_ip + payload
+	if ENCRYPTION_ENABLED:
+		body = encrypt_frame_body(body)
 	return struct.pack("!I", len(body)) + body
 
 
@@ -213,6 +305,8 @@ def unpack_datagram_frame(frame_body):
 	Raises:
 	    ValueError: If frame format is invalid or incomplete
 	"""
+	if ENCRYPTION_ENABLED:
+		frame_body = decrypt_frame_body(frame_body)
 	if len(frame_body) < 4:
 		raise ValueError("Frame is too short")
 
@@ -628,10 +722,16 @@ def handle_tcp_client(conn, client_addr, udp_family, udp_target):
 				frame_body = read_frame(conn)
 				if frame_body is None:
 					break
-				msg_type, endpoint, payload = unpack_datagram_frame(frame_body)
+				try:
+					msg_type, endpoint, payload = unpack_datagram_frame(frame_body)
+				except ValueError as exc:
+					print(f"[t2u] Invalid TCP frame from {client_addr}: {exc}")
+					reset_tcp_connection(conn)
+					return
 				if msg_type != MSG_UDP_TO_REMOTE:
-					print(f"[t2u] Ignoring unknown frame type: {msg_type}")
-					continue
+					print(f"[t2u] Invalid TCP frame type from {client_addr}: {msg_type}")
+					reset_tcp_connection(conn)
+					return
 
 				flow_sock, _ = get_or_create_flow(endpoint)
 				try:
@@ -646,7 +746,7 @@ def handle_tcp_client(conn, client_addr, udp_family, udp_target):
 						pass
 					continue
 				print(f"[t2u] TCP {endpoint} -> UDP {udp_target}, {len(payload)} bytes")
-		except (OSError, ValueError) as exc:
+		except OSError as exc:
 			print(f"[t2u] Client handling failed for {client_addr}: {exc}")
 		finally:
 			stop_event.set()
@@ -697,6 +797,12 @@ def build_parser():
 		help="Thread pool size, default is 8",
 	)
 	parser.add_argument(
+		"-k",
+		"--key",
+		dest="key",
+		help="Password for ChaCha20-Poly1305 encryption",
+	)
+	parser.add_argument(
 		"--debug",
 		action="store_true",
 		help="Enable debug logging",
@@ -715,11 +821,21 @@ def main():
 	args = parser.parse_args()
 
 	# Enable debug logging if requested
-	global DEBUG
+	global DEBUG, ENCRYPTION_ENABLED, ENCRYPTION_KEY
 	DEBUG = bool(args.debug)
 
 	if args.workers < 1:
 		parser.error("--workers must be greater than or equal to 1")
+
+	if args.key is not None:
+		try:
+			ENCRYPTION_KEY = derive_key_from_password(args.key)
+			ensure_crypto_available()
+			ENCRYPTION_ENABLED = True
+			print("[crypto] ChaCha20-Poly1305 encryption enabled")
+		except RuntimeError as exc:
+			print(f"[crypto] {exc}")
+			sys.exit(1)
 
 	local_host, local_port = args.listen
 	remote_host, remote_port = args.remote
