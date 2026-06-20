@@ -97,18 +97,6 @@ def parse_endpoint(value):
 
 	return host, port
 
-def normalize_endpoint(addr):
-	"""
-	Normalize an endpoint tuple to (host, port) format.
-	
-	Args:
-	    addr: Address tuple (typically from recvfrom)
-	    
-	Returns:
-	    Tuple of (host, port)
-	"""
-	return addr[0], addr[1]
-
 def recv_exact(sock, size):
 	"""
 	Receive exactly the specified number of bytes from a socket.

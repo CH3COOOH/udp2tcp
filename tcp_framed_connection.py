@@ -112,12 +112,12 @@ class TcpFramedConnection:
 				return frame
 			except ConnectionResetError as exc:
 				log(f"TCP reset detected: {exc}, resetting and retrying")
-				debug(f"[TcpFramedConnection] TCP reset detected: {exc}, resetting and retrying")
+				debug(f"[TcpFramedConnection] TCP reset detected, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
 					self._reset_locked()
 			except OSError as exc:
 				log(f"Read error: {exc}, resetting and retrying")
-				debug(f"[TcpFramedConnection] Read error: {exc}, resetting and retrying")
+				debug(f"[TcpFramedConnection] Read error, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
 					self._reset_locked()
 
