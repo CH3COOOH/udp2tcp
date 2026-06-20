@@ -84,12 +84,6 @@ class Crypto:
         try:
             return cipher.decrypt(nonce, ciphertext, None)
         except Exception as exc:
-            # try:
-            #     from cryptography.exceptions import InvalidTag
-            # except ImportError:
-            #     raise ValueError("Decryption failed") from exc
-            # if isinstance(exc, InvalidTag):
-            #     raise ValueError("Decryption failed or authentication tag invalid") from exc
             raise ValueError("[crypto] Decryption failed") from exc
 
 if __name__ == "__main__":

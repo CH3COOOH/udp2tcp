@@ -1,8 +1,12 @@
 import threading
 import socket
 
-from socket_util import resolve_address, read_frame
+from socket_util import resolve_address, read_frame, reset_tcp_connection
 from debug import debug
+
+
+def log(msg):
+	print("[tcp_framed_connection] " + msg)
 
 
 class TcpFramedConnection:
@@ -102,10 +106,17 @@ class TcpFramedConnection:
 			try:
 				frame = read_frame(sock)
 				if frame is None:
-					debug(f"[TcpFramedConnection] Peer closed connection {self.host}:{self.port}")
-					raise OSError("TCP peer closed")
+					log(f"Peer closed/reset connection {self.host}:{self.port}")
+					debug(f"[TcpFramedConnection] Peer closed/reset connection {self.host}:{self.port}")
+					raise ConnectionResetError("TCP peer closed/reset")
 				return frame
+			except ConnectionResetError as exc:
+				log(f"TCP reset detected: {exc}, resetting and retrying")
+				debug(f"[TcpFramedConnection] TCP reset detected: {exc}, resetting and retrying")
+				with self.state_lock:
+					self._reset_locked()
 			except OSError as exc:
+				log(f"Read error: {exc}, resetting and retrying")
 				debug(f"[TcpFramedConnection] Read error: {exc}, resetting and retrying")
 				with self.state_lock:
 					self._reset_locked()
@@ -117,4 +128,14 @@ class TcpFramedConnection:
 		with self.state_lock:
 			debug(f"[TcpFramedConnection] Closing connection to {self.host}:{self.port}")
 			self._reset_locked()
+
+	def reset(self):
+		"""
+		Force a TCP reset for the current connection.
+		"""
+		with self.state_lock:
+			if self.sock is not None:
+				debug(f"[TcpFramedConnection] Resetting connection to {self.host}:{self.port}")
+				reset_tcp_connection(self.sock)
+				self.sock = None
 

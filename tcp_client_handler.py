@@ -8,6 +8,9 @@ from socket_util import read_frame, reset_tcp_connection, pack_datagram_frame, u
 
 from debug import debug
 
+def log(msg):
+	print("[tcp_client_handler] " + msg)
+
 class TcpClientHandler:
 	"""
 	Handler for a single TCP client connection in TCP-to-UDP mode.
@@ -26,16 +29,16 @@ class TcpClientHandler:
 		self.flow_lock = threading.Lock()
 		self.flows = {}
 		self.send_lock = threading.Lock()
-		print(f"[t2u] TCP client connected: {client_addr}")
+		log(f"[t2u] TCP client connected: {client_addr}")
 
 	def send_back_to_tcp(self, endpoint, payload):
 		frame = pack_datagram_frame(MSG_REMOTE_TO_UDP, endpoint, payload, cipher=self.cipher)
-		print(f"[t2u] send_back_to_tcp: sending {len(payload)} bytes to TCP endpoint {endpoint}")
+		log(f"send_back_to_tcp: sending {len(payload)} bytes to TCP endpoint {endpoint}")
 		with self.send_lock:
 			try:
 				self.conn.sendall(frame)
 			except OSError as exc:
-				print(f"[t2u] Send back to TCP failed for {endpoint}: {exc}")
+				log(f"Send back to TCP failed for {endpoint}: {exc}")
 				self.stop_event.set()
 				raise
 
@@ -70,7 +73,7 @@ class TcpClientHandler:
 				except OSError as exc:
 					if self.stop_event.is_set():
 						break
-					print(f"[t2u] UDP reply receive failed for {endpoint}: {exc}")
+					log(f"UDP reply receive failed for {endpoint}: {exc}")
 					break
 				if not payload:
 					break
@@ -96,11 +99,11 @@ class TcpClientHandler:
 					try:
 						msg_type, endpoint, payload = unpack_datagram_frame(frame_body, cipher=self.cipher)
 					except ValueError as exc:
-						print(f"[t2u] Invalid TCP frame from {self.client_addr}: {exc}")
+						log(f"[t2u] Invalid TCP frame from {self.client_addr}: {exc}")
 						reset_tcp_connection(self.conn)
 						return
 					if msg_type != MSG_UDP_TO_REMOTE:
-						print(f"[t2u] Invalid TCP frame type from {self.client_addr}: {msg_type}")
+						log(f"[t2u] Invalid TCP frame type from {self.client_addr}: {msg_type}")
 						reset_tcp_connection(self.conn)
 						return
 
@@ -108,7 +111,7 @@ class TcpClientHandler:
 					try:
 						flow_sock.send(payload)
 					except OSError as exc:
-						print(f"[t2u] UDP send failed for {endpoint} -> {self.udp_target}: {exc}")
+						log(f"[t2u] UDP send failed for {endpoint} -> {self.udp_target}: {exc}")
 						with self.flow_lock:
 							self.flows.pop(endpoint, None)
 						try:
@@ -116,9 +119,9 @@ class TcpClientHandler:
 						except OSError:
 							pass
 						continue
-					print(f"[t2u] TCP {endpoint} -> UDP {self.udp_target}, {len(payload)} bytes")
+					log(f"[t2u] TCP {endpoint} -> UDP {self.udp_target}, {len(payload)} bytes")
 			except OSError as exc:
-				print(f"[t2u] Client handling failed for {self.client_addr}: {exc}")
+				log(f"[t2u] Client handling failed for {self.client_addr}: {exc}")
 			finally:
 				self.stop_event.set()
 				with self.flow_lock:
@@ -128,4 +131,4 @@ class TcpClientHandler:
 						except OSError:
 							pass
 					self.flows.clear()
-				print(f"[t2u] TCP client disconnected: {self.client_addr}")
+				log(f"[t2u] TCP client disconnected: {self.client_addr}")

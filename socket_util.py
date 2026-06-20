@@ -5,6 +5,9 @@ import struct
 from const import *
 from debug import debug
 
+def log(msg):
+	print("[socket_util]" + msg)
+
 def resolve_address(host, port, socktype, passive=False):
 	"""
 	Resolve a host:port address to a socket address using getaddrinfo.
@@ -57,10 +60,7 @@ def reset_tcp_connection(sock):
 	"""
 	try:
 		sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-	except OSError:
-		pass
-	try:
-		sock.shutdown(socket.SHUT_RDWR)
+		log(f"Socket SO_LINGER set to force reset")
 	except OSError:
 		pass
 	try:
@@ -151,7 +151,7 @@ def read_frame(sock):
 	if body_len == 0:
 		return b""
 	if body_len > MAX_FRAME_SIZE:
-		raise ValueError(f"Frame too large: {body_len} bytes")
+		raise ValueError(f"[socket_util] Frame too large: {body_len} bytes")
 	return recv_exact(sock, body_len)
 
 
@@ -173,9 +173,11 @@ def pack_datagram_frame(msg_type, endpoint, payload, cipher=None):
 def unpack_datagram_frame(frame_body, cipher=None):
 	if cipher is not None:
 		frame_body = cipher.decrypt_frame_body(frame_body)
+		if frame_body is None:
+			raise ValueError("[socket_util] Decryption failed or nonce reuse detected")
 		debug(f"[socket_util] Decrypted frame body: {frame_body.hex()}")
 	if len(frame_body) < 4:
-		raise ValueError("Frame is too short")
+		raise ValueError("[socket_util] Frame is too short")
 
 	msg_type, addr_type, port = struct.unpack("!BBH", frame_body[:4])
 	if addr_type == ADDR_TYPE_IPV4:
@@ -183,10 +185,10 @@ def unpack_datagram_frame(frame_body, cipher=None):
 	elif addr_type == ADDR_TYPE_IPV6:
 		addr_len = 16
 	else:
-		raise ValueError(f"Unsupported address type: {addr_type}")
+		raise ValueError(f"[socket_util] Unsupported address type: {addr_type}")
 
 	if len(frame_body) < 4 + addr_len:
-		raise ValueError("Frame address section is incomplete")
+		raise ValueError("[socket_util] Frame address section is incomplete")
 
 	host_raw = frame_body[4 : 4 + addr_len]
 	host = str(ipaddress.ip_address(host_raw))
