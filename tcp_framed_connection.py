@@ -90,19 +90,28 @@ class TcpFramedConnection:
 					if attempt == 1:
 						raise
 
-	def read_frame(self):
+	def read_frame(self, reconnect=True):
 		"""
-		Read a frame from the remote server with automatic reconnection on failure.
+		Read a frame from the remote server.
+		
+		If reconnect is True, the connection will be established or reestablished
+		automatically. If reconnect is False, an existing connection is required.
 		
 		Returns:
-		    Frame body bytes
-		    
+			Frame body bytes
+			
 		Raises:
-		    OSError: On persistent connection failures
+			OSError: On persistent connection failures
+			ConnectionResetError: When no active connection exists or the remote closes
 		"""
 		while True:
 			with self.state_lock:
-				sock = self._ensure_connected_locked()
+				if reconnect:
+					sock = self._ensure_connected_locked()
+				else:
+					if self.sock is None:
+						raise ConnectionResetError("No active TCP connection")
+					sock = self.sock
 			try:
 				frame = read_frame(sock)
 				if frame is None:
@@ -115,11 +124,17 @@ class TcpFramedConnection:
 				debug(f"[TcpFramedConnection] TCP reset detected, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
 					self._reset_locked()
+				if reconnect:
+					continue
+				raise
 			except OSError as exc:
 				log(f"Read error: {exc}, resetting and retrying")
 				debug(f"[TcpFramedConnection] Read error, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
 					self._reset_locked()
+				if reconnect:
+					continue
+				raise
 
 	def close(self):
 		"""
@@ -128,6 +143,11 @@ class TcpFramedConnection:
 		with self.state_lock:
 			debug(f"[TcpFramedConnection] Closing connection to {self.host}:{self.port}")
 			self._reset_locked()
+
+	def is_connected(self):
+		"""Return True when a TCP socket is currently open."""
+		with self.state_lock:
+			return self.sock is not None
 
 	def reset(self):
 		"""

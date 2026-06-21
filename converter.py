@@ -23,7 +23,7 @@ class UTConverter:
 		self.cipher = cipher
 		self.debug = debug
 
-	def forward_udp_packet(self, tunnel, payload, client_addr):
+	def forward_udp_packet(self, tunnel, payload, client_addr, connected_event=None):
 		"""
 		Forward a single UDP packet to the remote TCP server.
 		
@@ -31,18 +31,21 @@ class UTConverter:
 			tunnel: TcpFramedConnection to send through
 			payload: UDP packet payload
 			client_addr: UDP client address (host, port)
+			connected_event: Optional event to signal when TCP is active
 		"""
 		try:
 			log(f"forward_udp_packet: received {len(payload)} bytes from {client_addr}")
 			frame = socket_util.pack_datagram_frame(MSG_UDP_TO_REMOTE, client_addr, payload, cipher=self.cipher)
 			tunnel.send_frame(frame)
+			if connected_event is not None and not connected_event.is_set():
+				connected_event.set()
 			debug(f"{client_addr} -> TCP, {len(payload)} bytes")
 		except OSError as exc:
 			log(f"Forwarding failed for {client_addr}: {exc}")
 			time.sleep(10)  # Avoid tight loop on persistent errors
 
 	
-	def u2t_reverse_loop(self, tunnel, udp_sock, stop_event):
+	def u2t_reverse_loop(self, tunnel, udp_sock, stop_event, connected_event):
 		"""
 		Handle reverse forwarding for UDP-to-TCP mode.
 		
@@ -53,30 +56,40 @@ class UTConverter:
 			tunnel: TcpFramedConnection to read responses from
 			udp_sock: UDP socket to send responses back to clients
 			stop_event: Threading event to signal shutdown
+			connected_event: Event signaled when a TCP connection should be active
 		"""
 		while not stop_event.is_set():
+			if not connected_event.wait(timeout=1.0):
+				continue
 			try:
-				frame_body = tunnel.read_frame()
+				frame_body = tunnel.read_frame(reconnect=False)
 				try:
 					msg_type, client_endpoint, payload = socket_util.unpack_datagram_frame(frame_body, cipher=self.cipher)
 				except ValueError as exc:
 					log(f"Unpacking frame failed: {exc}")
 					log("u2t received invalid/undecryptable frame, resetting TCP tunnel")
 					tunnel.reset()
+					connected_event.clear()
 					continue
 				if msg_type != MSG_REMOTE_TO_UDP:
 					log(f"Invalid frame type received: {msg_type}")
 					log("u2t received wrong message type, resetting TCP tunnel")
 					tunnel.reset()
+					connected_event.clear()
 					continue
 				udp_sock.sendto(payload, client_endpoint)
 				debug(f"TCP -> {client_endpoint}, {len(payload)} bytes")
-			except (OSError, ValueError) as exc:
+			except ConnectionResetError as exc:
 				if stop_event.is_set():
 					return
 				log(f"Reverse relay error: {exc}")
-				if isinstance(exc, OSError):
-					log("u2t detected a TCP connection reset/close event")
+				log("u2t detected a TCP connection reset/close event")
+				connected_event.clear()
+			except OSError as exc:
+				if stop_event.is_set():
+					return
+				log(f"Reverse relay error: {exc}")
+				connected_event.clear()
 
 	def run_udp_to_tcp(self, workers):
 		"""
@@ -93,6 +106,10 @@ class UTConverter:
 		udp_sock = socket_util.create_bound_socket(self.listen[0], self.listen[1], socket.SOCK_DGRAM)
 		tunnel = TcpFramedConnection(self.remote[0], self.remote[1])
 		stop_event = threading.Event()
+		connected_event = threading.Event()
+		last_activity = time.time()
+
+		udp_sock.settimeout(1.0)
 
 		log(f"[u2t] Listening for UDP on {self.listen[0]}:{self.listen[1]}")
 		log(f"[u2t] Forwarding to TCP target {self.remote[0]}:{self.remote[1]}")
@@ -100,7 +117,7 @@ class UTConverter:
 
 		reader = threading.Thread(
 			target=self.u2t_reverse_loop,
-			args=(tunnel, udp_sock, stop_event),
+			args=(tunnel, udp_sock, stop_event, connected_event),
 			daemon=True,
 		)
 		reader.start()
@@ -110,16 +127,24 @@ class UTConverter:
 				while True:
 					try:
 						payload, client_addr = udp_sock.recvfrom(BUFFER_SIZE)
+					except socket.timeout:
+						if connected_event.is_set() and time.time() - last_activity >= 60:
+							log("[u2t] No UDP traffic for 60 seconds, closing idle TCP connection")
+							connected_event.clear()
+							tunnel.close()
+						continue
 					except ConnectionResetError:
 						# Ignore ICMP "port unreachable" on Windows which maps to
 						# WSAECONNRESET (10054). Continue listening for other packets.
 						continue
+					last_activity = time.time()
 					debug(f"recvfrom: got {len(payload)} bytes from {client_addr}")
-					executor.submit(self.forward_udp_packet, tunnel, payload, client_addr)
+					executor.submit(self.forward_udp_packet, tunnel, payload, client_addr, connected_event)
 			except KeyboardInterrupt:
 				log("\n[u2t] Shutdown signal received, closing")
 			finally:
 				stop_event.set()
+				connected_event.clear()
 				tunnel.close()
 
 	def run_tcp_to_udp(self, workers):
@@ -159,7 +184,7 @@ class UTConverter:
 					executor.submit(handler.run)
 			except KeyboardInterrupt:
 				log("\n[t2u] Shutdown signal received, closing")
-	
+
 	def run(self):
 		if self.mode == "u2t":
 			self.run_udp_to_tcp(self.workers)
