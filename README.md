@@ -5,6 +5,7 @@ A bidirectional UDP/TCP converter that allows seamless translation of UDP traffi
 ## Features
 
 - **Bidirectional Conversion**: Convert UDP to TCP (u2t mode) or TCP to UDP (t2u mode)
+- **Optional Encryption**: Supports ChaCha20-Poly1305 encryption for frame bodies using a shared password
 - **Dual Mode Operation**:
   - **UDP-to-TCP (u2t)**: Listens for UDP packets and forwards them over a TCP connection to a remote server
   - **TCP-to-UDP (t2u)**: Listens for TCP connections and forwards the data to a UDP endpoint
@@ -17,7 +18,11 @@ A bidirectional UDP/TCP converter that allows seamless translation of UDP traffi
 
 ### Requirements
 - Python 3.6 or higher
-- No external dependencies required (uses only Python standard library)
+- No external dependencies required for normal operation
+- If using encryption mode (`-k/--key`), install `cryptography` first:
+  ```bash
+  pip install cryptography
+  ```
 
 ### Setup
 
@@ -43,6 +48,7 @@ python udp2tcp.py --mode {u2t|t2u} -l <listen_host:port> -r <remote_host:port> [
 - `-l, --listen`: Local endpoint to listen on in format `host:port`
 - `-r, --remote`: Remote endpoint in format `host:port` (supports FQDN for TCP targets)
 - `--workers`: Thread pool size (default: 8, minimum: 1)
+- `-k, --key`: Password for ChaCha20-Poly1305 encryption of the TCP frame body
 
 ### UDP-to-TCP Conversion (u2t)
 
@@ -54,6 +60,9 @@ python udp2tcp.py --mode u2t -l 127.0.0.1:12345 -r 192.168.1.100:54321
 
 # Listen on all interfaces with domain name resolution
 python udp2tcp.py --mode u2t -l 0.0.0.0:12345 -r example.com:54321
+
+# Enable encryption with a shared password
+python udp2tcp.py --mode u2t -l 127.0.0.1:12345 -r 192.168.1.100:54321 -k mysecret
 ```
 
 ### TCP-to-UDP Conversion (t2u)
@@ -66,6 +75,9 @@ python udp2tcp.py --mode t2u -l 0.0.0.0:54321 -r 127.0.0.1:12345
 
 # Listen on localhost with custom worker pool
 python udp2tcp.py --mode t2u -l 127.0.0.1:54321 -r 192.168.1.50:12345 --workers 16
+
+# Enable encryption with a shared password
+python udp2tcp.py --mode t2u -l 0.0.0.0:54321 -r 127.0.0.1:12345 -k mysecret
 ```
 
 ## Protocol Details
