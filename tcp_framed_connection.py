@@ -1,7 +1,7 @@
 import threading
 import socket
 
-from socket_util import resolve_address, read_frame, reset_tcp_connection
+from socket_util import configure_tcp_keepalive, resolve_address, read_frame, reset_tcp_connection
 from debug import debug
 
 
@@ -59,6 +59,7 @@ class TcpFramedConnection:
 		debug(f"[TcpFramedConnection] Connecting to {self.host}:{self.port}")
 		sock = socket.socket(family, socktype, proto)
 		sock.connect(sockaddr)
+		configure_tcp_keepalive(sock)
 		# Disable Nagle for lower latency where appropriate
 		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 		self.sock = sock
@@ -86,7 +87,8 @@ class TcpFramedConnection:
 				except OSError as exc:
 					debug(f"[TcpFramedConnection] Send failed (attempt {attempt+1}): {exc}")
 					with self.state_lock:
-						self._reset_locked()
+						if self.sock is sock:
+							self._reset_locked()
 					if attempt == 1:
 						raise
 
@@ -123,7 +125,8 @@ class TcpFramedConnection:
 				log(f"TCP reset detected: {exc}, resetting and retrying")
 				debug(f"[TcpFramedConnection] TCP reset detected, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
-					self._reset_locked()
+					if self.sock is sock:
+						self._reset_locked()
 				if reconnect:
 					continue
 				raise
@@ -131,7 +134,8 @@ class TcpFramedConnection:
 				log(f"Read error: {exc}, resetting and retrying")
 				debug(f"[TcpFramedConnection] Read error, resetting and retrying. Error:\n{exc}")
 				with self.state_lock:
-					self._reset_locked()
+					if self.sock is sock:
+						self._reset_locked()
 				if reconnect:
 					continue
 				raise

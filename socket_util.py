@@ -68,6 +68,18 @@ def reset_tcp_connection(sock):
 	except OSError:
 		pass
 
+def configure_tcp_keepalive(sock):
+	"""Enable TCP keepalive so dead peers are detected without new payloads."""
+	sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+	if hasattr(socket, "TCP_KEEPIDLE"):
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+	if hasattr(socket, "TCP_KEEPINTVL"):
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+	if hasattr(socket, "TCP_KEEPCNT"):
+		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+	if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+		sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30_000, 10_000))
+
 def parse_endpoint(value):
 	"""
 	Parse and validate an endpoint string in host:port format.

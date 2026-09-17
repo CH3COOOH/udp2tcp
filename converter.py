@@ -83,13 +83,17 @@ class UTConverter:
 				if stop_event.is_set():
 					return
 				log(f"Reverse relay error: {exc}")
-				log("u2t detected a TCP connection reset/close event")
-				connected_event.clear()
+				if tunnel.is_connected():
+					log("u2t reader recovered on the replacement TCP connection")
+				else:
+					log("u2t detected a TCP connection reset/close event")
+					connected_event.clear()
 			except OSError as exc:
 				if stop_event.is_set():
 					return
 				log(f"Reverse relay error: {exc}")
-				connected_event.clear()
+				if not tunnel.is_connected():
+					connected_event.clear()
 
 	def run_udp_to_tcp(self, workers):
 		"""
@@ -180,6 +184,7 @@ class UTConverter:
 					except OSError as exc:
 						log(f"[t2u] Accept failed: {exc}")
 						continue
+					socket_util.configure_tcp_keepalive(conn)
 					handler = TcpClientHandler(conn, client_addr, udp_family, udp_target, cipher=self.cipher)
 					executor.submit(handler.run)
 			except KeyboardInterrupt:
