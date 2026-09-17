@@ -58,7 +58,9 @@ Listens for UDP packets on a local address and forwards them over TCP to a remot
 # Listen on UDP 127.0.0.1:12345 and forward to TCP server at 192.168.1.100:54321
 python udp2tcp.py --mode u2t -l 127.0.0.1:12345 -r 192.168.1.100:54321
 
-# Listen on all interfaces with domain name resolution
+# Listen on all interfaces with domain name resolution. Use 0.0.0.0 when the
+# machine's own IP address may change; binding to an old specific IP or 
+# 127.0.0.1 will not move the UDP socket to the new address.
 python udp2tcp.py --mode u2t -l 0.0.0.0:12345 -r example.com:54321
 
 # Enable encryption with a shared password
