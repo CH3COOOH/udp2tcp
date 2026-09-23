@@ -55,6 +55,12 @@ def build_parser():
 		help="Thread pool size, default is 8",
 	)
 	parser.add_argument(
+		"--tcp-timeout",
+		type=float,
+		default=10.0,
+		help="TCP socket read timeout in seconds (default: 10.0)",
+	)
+	parser.add_argument(
 		"-k",
 		"--key",
 		dest="key",
@@ -105,8 +111,11 @@ def main():
 		remote=(remote_host, remote_port),
 		workers=args.workers,
 		cipher=crypto if args.key is not None else None,
-		debug=args.debug
+		debug=args.debug,
+		tcp_timeout=args.tcp_timeout,
 	)
+	# propagate tcp timeout if provided
+	converter.tcp_timeout = args.tcp_timeout
 	converter.run()
 
 

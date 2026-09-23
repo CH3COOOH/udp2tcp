@@ -3,6 +3,7 @@ import socket
 
 from socket_util import resolve_address, read_frame, reset_tcp_connection
 from debug import debug
+import traceback
 
 
 def log(msg):
@@ -42,6 +43,9 @@ class TcpFramedConnection:
 			except OSError:
 				pass
 			self.sock = None
+			# Log stack to help identify who requested the reset
+			st = ''.join(traceback.format_stack(limit=6))
+			debug(f"[TcpFramedConnection] _reset_locked call stack:\n{st}")
 
 	def _ensure_connected_locked(self):
 		"""
@@ -58,6 +62,26 @@ class TcpFramedConnection:
 		)
 		debug(f"[TcpFramedConnection] Connecting to {self.host}:{self.port}")
 		sock = socket.socket(family, socktype, proto)
+		# Set a short read timeout so a dead peer is detected promptly
+		try:
+			# use configured timeout if provided on the object or fall back to 10s
+			timeout = getattr(self, 'tcp_timeout', 10.0)
+			sock.settimeout(timeout)
+		except OSError:
+			pass
+		# Enable TCP keepalive where available to help detect broken connections
+		try:
+			sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+			# Platform-specific keepalive tuning (best-effort)
+			if hasattr(socket, 'TCP_KEEPIDLE'):
+				sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+			if hasattr(socket, 'TCP_KEEPINTVL'):
+				sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+			if hasattr(socket, 'TCP_KEEPCNT'):
+				sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+		except OSError:
+			# Non-fatal if options aren't supported
+			pass
 		sock.connect(sockaddr)
 		# Disable Nagle for lower latency where appropriate
 		sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -113,7 +137,14 @@ class TcpFramedConnection:
 						raise ConnectionResetError("No active TCP connection")
 					sock = self.sock
 			try:
-				frame = read_frame(sock)
+				try:
+					frame = read_frame(sock)
+				except socket.timeout:
+					# Non-fatal: no data available yet. If reconnecting, loop and retry.
+					if reconnect:
+						continue
+					# If not reconnecting, propagate as connection reset
+					raise ConnectionResetError("TCP read timed out")
 				if frame is None:
 					log(f"Peer closed/reset connection {self.host}:{self.port}")
 					debug(f"[TcpFramedConnection] Peer closed/reset connection {self.host}:{self.port}")
@@ -156,6 +187,13 @@ class TcpFramedConnection:
 		with self.state_lock:
 			if self.sock is not None:
 				debug(f"[TcpFramedConnection] Resetting connection to {self.host}:{self.port}")
-				reset_tcp_connection(self.sock)
+				# force TCP reset at OS level
+				try:
+					reset_tcp_connection(self.sock)
+				except Exception as e:
+					debug(f"[TcpFramedConnection] reset_tcp_connection failed: {e}")
 				self.sock = None
+				# Log stack to help diagnose who initiated reset
+				st = ''.join(traceback.format_stack(limit=6))
+				debug(f"[TcpFramedConnection] reset() call stack:\n{st}")
 

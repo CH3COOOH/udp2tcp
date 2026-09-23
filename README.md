@@ -50,6 +50,16 @@ python udp2tcp.py --mode {u2t|t2u} -l <listen_host:port> -r <remote_host:port> [
 - `--workers`: Thread pool size (default: 8, minimum: 1)
 - `-k, --key`: Password for ChaCha20-Poly1305 encryption of the TCP frame body
 
+- `--tcp-timeout`: TCP socket read timeout in seconds (default: 10.0). Controls how quickly the program detects dead TCP peers and triggers reconnect/reset. Lower values make failures detected faster but may cause more reconnections on flaky links.
+
+### Example: Controlling TCP timeout
+
+You can tune TCP failure detection responsiveness with `--tcp-timeout`. For example, to set a 30 second read timeout:
+
+```bash
+python udp2tcp.py --mode u2t -l 0.0.0.0:14999 -r 192.168.31.15:4999 --tcp-timeout 30.0
+```
+
 ### UDP-to-TCP Conversion (u2t)
 
 Listens for UDP packets on a local address and forwards them over TCP to a remote server. Responses are relayed back to the original UDP clients.

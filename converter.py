@@ -15,13 +15,15 @@ def log(msg):
 	print("[converter] " + msg)
 
 class UTConverter:
-	def __init__(self, mode, listen, remote, workers=8, cipher=None, debug=False):
+	def __init__(self, mode, listen, remote, workers=8, cipher=None, debug=False, tcp_timeout=10.0):
 		self.mode = mode
 		self.listen = listen
 		self.remote = remote
 		self.workers = workers
 		self.cipher = cipher
 		self.debug = debug
+		# TCP read timeout (seconds) for sockets; default can be overridden via CLI
+		self.tcp_timeout = tcp_timeout if tcp_timeout is not None else 10.0
 
 	def forward_udp_packet(self, tunnel, payload, client_addr, connected_event=None):
 		"""
@@ -35,7 +37,27 @@ class UTConverter:
 		"""
 		try:
 			log(f"forward_udp_packet: received {len(payload)} bytes from {client_addr}")
-			frame = socket_util.pack_datagram_frame(MSG_UDP_TO_REMOTE, client_addr, payload, cipher=self.cipher)
+			# If the UDP sender is on localhost (loopback), replace the host
+			# with the outbound-facing IP so the remote can reach it.
+			client_endpoint = client_addr
+			host = client_addr[0]
+			try:
+				ip_obj = ipaddress.ip_address(host)
+				if ip_obj.is_loopback:
+					try:
+						fam = socket.AF_INET6 if (":" in self.remote[0]) else socket.AF_INET
+						with socket.socket(fam, socket.SOCK_DGRAM) as s:
+							# connect to remote to let OS pick the outbound interface
+							s.connect((self.remote[0], self.remote[1]))
+							mapped_host = s.getsockname()[0]
+							client_endpoint = (mapped_host, client_addr[1])
+							log(f"Mapped loopback client {host} -> {mapped_host} for remote delivery")
+					except Exception as e:
+						log(f"Failed to map loopback address {host}: {e}")
+			except ValueError:
+				# If host is not a parsable IP, leave as-is
+				pass
+			frame = socket_util.pack_datagram_frame(MSG_UDP_TO_REMOTE, client_endpoint, payload, cipher=self.cipher)
 			tunnel.send_frame(frame)
 			if connected_event is not None and not connected_event.is_set():
 				connected_event.set()
@@ -78,7 +100,20 @@ class UTConverter:
 					connected_event.clear()
 					continue
 				udp_sock.sendto(payload, client_endpoint)
-				debug(f"TCP -> {client_endpoint}, {len(payload)} bytes")
+				# Use a temporary unbound UDP socket for replies so the OS selects the
+				# correct outgoing interface/source address (handles local IP changes).
+				try:
+					fam = socket.AF_INET6 if (":" in client_endpoint[0]) else socket.AF_INET
+					with socket.socket(fam, socket.SOCK_DGRAM) as tmp:
+						# let OS pick source address based on routing
+						tmp.sendto(payload, client_endpoint)
+					debug(f"Temporary-socket UDP -> {client_endpoint}, {len(payload)} bytes")
+				except OSError as send_exc:
+					log(f"Temporary UDP send failed to {client_endpoint}: {send_exc}")
+					log("u2t reverse relay encountered a send failure, resetting TCP tunnel")
+					tunnel.reset()
+					connected_event.clear()
+					continue
 			except ConnectionResetError as exc:
 				if stop_event.is_set():
 					return
@@ -105,10 +140,11 @@ class UTConverter:
 		"""
 		udp_sock = socket_util.create_bound_socket(self.listen[0], self.listen[1], socket.SOCK_DGRAM)
 		tunnel = TcpFramedConnection(self.remote[0], self.remote[1])
+		# propagate configured tcp timeout into the tunnel instance
+		tunnel.tcp_timeout = self.tcp_timeout
 		stop_event = threading.Event()
 		connected_event = threading.Event()
 		last_activity = time.time()
-
 		udp_sock.settimeout(1.0)
 
 		log(f"[u2t] Listening for UDP on {self.listen[0]}:{self.listen[1]}")

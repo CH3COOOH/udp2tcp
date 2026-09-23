@@ -50,6 +50,11 @@ class TcpClientHandler:
 
 			flow_sock = socket.socket(self.udp_family, socket.SOCK_DGRAM)
 			flow_sock.connect(self.udp_target)
+			# Set a short timeout on UDP flows to allow prompt thread shutdown
+			try:
+				flow_sock.settimeout(5.0)
+			except OSError:
+				pass
 			thread = threading.Thread(
 				target=self.reply_reader,
 				args=(endpoint, flow_sock),
